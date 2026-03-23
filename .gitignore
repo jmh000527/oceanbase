@@ -98,6 +98,7 @@ compile_commands.json
 *.ccls-cache/
 .cproject
 .cache
+.clangd/
 .history/*
 ## Intellij files
 .idea

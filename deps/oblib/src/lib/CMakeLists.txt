@@ -496,6 +496,7 @@ if(CMAKE_SYSTEM_PROCESSOR STREQUAL "x86_64")
     libcpuinfo.a
     libsimd.a
     libvsag_static.a
+    libfmt.a
     libdiskann.a
     libopenblas.a
     libgfortran_static.a
@@ -511,6 +512,7 @@ elseif(CMAKE_SYSTEM_PROCESSOR STREQUAL "aarch64")
     libcpuinfo.a
     libsimd.a
     libvsag_static.a
+    libfmt.a
     libdiskann.a
     libopenblas.a
     libgfortran_static.a
