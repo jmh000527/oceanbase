@@ -1,0 +1,145 @@
+================================================================================
+                    多查询块 Hint 定位概念图
+================================================================================
+
+示例 SQL：
+----------
+SELECT t1.id, t1.name,                                    ← SEL$MAIN0001 (主查询)
+       (SELECT COUNT(*)                                   ← SEL$SUB_0001 (子查询1)
+        FROM orders o
+        WHERE o.user_id = t1.id) as order_count,
+       (SELECT MAX(amount)                                ← SEL$SUB_0002 (子查询2)
+        FROM payments p
+        WHERE p.user_id = t1.id) as max_payment
+FROM users t1
+WHERE t1.status = 'active'
+  AND t1.id IN (SELECT user_id                            ← SEL$IN_00001 (子查询3)
+                FROM subscriptions
+                WHERE active = true);
+
+
+查询块树结构：
+-------------
+┌─────────────────────────────────────────────────────────────┐
+│ SEL$MAIN0001 (主查询)                                        │
+│ SELECT t1.id, t1.name, ...                                 │
+│ FROM users t1                                              │
+│ WHERE ...                                                  │
+├─────────────────────────────────────────────────────────────┤
+│  子查询块：                                                  │
+│  ├─ SEL$SUB_0001: SELECT COUNT(*) FROM orders             │
+│  ├─ SEL$SUB_0002: SELECT MAX(amount) FROM payments        │
+│  └─ SEL$IN_00001: SELECT user_id FROM subscriptions       │
+└─────────────────────────────────────────────────────────────┘
+
+
+Outline 中的 Hints 定位：
+-------------------------
+/*+
+    INDEX(@SEL$MAIN0001 t1 idx_users_status)     ──┐
+                                                    ├─ 指向主查询
+    LEADING(@SEL$MAIN0001 t1)                    ──┘
+
+    INDEX(@SEL$SUB_0001 o idx_orders_user)       ──── 指向子查询1
+
+    INDEX(@SEL$SUB_0002 p idx_payments_user)     ──── 指向子查询2
+
+    HASH_SJ(@SEL$IN_00001)                       ──┐
+                                                    ├─ 指向 IN 子查询
+    INDEX(@SEL$IN_00001 subscriptions idx_user)  ──┘
+*/
+
+
+Hint 应用过程：
+--------------
+1. 解析 SQL → 识别 4 个查询块
+   ┌─────────────┬──────────────────┬────────┐
+   │ 查询块      │ QB_NAME          │ 类型   │
+   ├─────────────┼──────────────────┼────────┤
+   │ 主查询      │ SEL$MAIN0001     │ SELECT │
+   │ 子查询1     │ SEL$SUB_0001     │ SELECT │
+   │ 子查询2     │ SEL$SUB_0002     │ SELECT │
+   │ IN 子查询   │ SEL$IN_00001     │ SELECT │
+   └─────────────┴──────────────────┴────────┘
+
+2. 匹配 Outline → 找到对应的 hints
+
+3. 分发 Hints → 每个查询块应用各自的 hints
+   SEL$MAIN0001 ← INDEX(...), LEADING(...)
+   SEL$SUB_0001 ← INDEX(...)
+   SEL$SUB_0002 ← INDEX(...)
+   SEL$IN_00001 ← HASH_SJ(...), INDEX(...)
+
+4. 生成执行计划 → 每个查询块按照指定的 hint 优化
+
+
+对比：简单实现 vs 完整实现
+---------------------------
+┌──────────────────┬────────────────────┬──────────────────────┐
+│ 功能             │ 简单实现（当前）   │ 完整实现（目标）     │
+├──────────────────┼────────────────────┼──────────────────────┤
+│ 识别查询块       │ ❌ 只看主查询      │ ✅ 递归识别所有块    │
+│ QB_NAME 生成     │ ❌ 无              │ ✅ SEL$12345678      │
+│ Hint 定位        │ ❌ 全局应用        │ ✅ @QB_NAME 精确定位 │
+│ 子查询支持       │ ❌ 不支持          │ ✅ WHERE/FROM/SELECT │
+│ CTE 支持         │ ❌ 不支持          │ ✅ WITH 子句         │
+│ UNION 支持       │ ❌ 不支持          │ ✅ SET 操作          │
+│ 嵌套深度         │ ❌ 单层            │ ✅ 任意深度          │
+└──────────────────┴────────────────────┴──────────────────────┘
+
+
+实际例子对比：
+--------------
+查询：
+  SELECT * FROM t1 WHERE id IN (SELECT id FROM t2)
+
+简单实现（当前）：
+  - 生成签名: "SELECT * FROM T1 WHERE ID IN (SELECT ID FROM T2)"
+  - Hints 应用: 全部应用到整个查询（无法区分主查询和子查询）
+  - 结果: ⚠️ 无法单独控制子查询的优化
+
+完整实现（目标）：
+  - 识别查询块:
+    * Block 0 (SEL$ABC123): SELECT * FROM t1 WHERE id IN (...)
+    * Block 1 (SEL$DEF456): SELECT id FROM t2
+  - Hints 应用:
+    /*+
+        INDEX(@SEL$ABC123 t1 idx_id)    ← 主查询
+        FULL(@SEL$DEF456 t2)             ← 子查询
+    */
+  - 结果: ✅ 精确控制每个查询块的优化
+
+
+关键技术点：
+-----------
+1. 查询树递归遍历
+   Query → RangeTblEntry → SubQuery
+         → FromClause → SubQuery  
+         → WhereClause → SubLink
+         → TargetList → SubLink
+         → CTE → SubQuery
+
+2. QB_NAME 生成算法
+   前缀 + MD5哈希(查询源) + 序号
+   例: SEL$ + ABCD1234 + _1 = SEL$ABCD1234_1
+
+3. Hint 与查询块映射
+   Hash表: QB_NAME → QueryBlockInfo
+   列表: QueryBlockHint[] 存储所有 hints
+   匹配: 根据 @QB_NAME 查找目标块
+
+4. 优化器集成
+   在 planner_hook 中：
+   - 遍历查询块树
+   - 查找每个块的 hints
+   - 调用优化器时传入对应的 hints
+
+
+总结：
+------
+✅ 当前实现是简化版本，适合单 SELECT 查询
+⚠️ 复杂 SQL（子查询、CTE、UNION）需要查询块识别机制
+🎯 目标是支持 OceanBase 风格的精确 hint 定位
+📚 已提供完整的设计文档和示例
+
+================================================================================
