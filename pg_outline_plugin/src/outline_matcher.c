@@ -5,6 +5,7 @@
  *
  * Implements multi-strategy matching of outlines to SQL queries
  * based on OceanBase's outline matching approach.
+ * Enhanced with multi-query block support.
  *
  *-------------------------------------------------------------------------
  */
@@ -12,6 +13,7 @@
 #include "postgres.h"
 #include "outline_matcher.h"
 #include "outline_normalize.h"
+#include "outline_query_block.h"
 #include "pg_outline.h"
 
 #include "nodes/parsenodes.h"
@@ -79,7 +81,7 @@ CheckOutlineEnabled(OutlineInfo *outline)
 bool
 ValidateOutlineMatch(OutlineInfo *outline, Query *parse)
 {
-    if (outline == NULL || parse == NULL)
+    if (outline == NULL)
         return false;
 
     /* Basic validation - check if enabled */
@@ -100,6 +102,33 @@ ValidateOutlineMatch(OutlineInfo *outline, Query *parse)
 }
 
 /*
+ * ValidateComplexOutlineMatch - Validate outline for complex query with blocks
+ */
+bool
+ValidateComplexOutlineMatch(OutlineInfo *outline, Query *parse, List *query_blocks)
+{
+    if (!ValidateOutlineMatch(outline, parse))
+        return false;
+
+    /* If query has multiple blocks, outline should support multi-block hints */
+    if (query_blocks != NIL && list_length(query_blocks) > 1)
+    {
+        /* Check if outline content contains @QB_NAME syntax */
+        if (outline->outline_content && strchr(outline->outline_content, '@'))
+        {
+            if (pg_outline_debug_log)
+            {
+                elog(DEBUG2, "pg_outline: Complex query with %d blocks, "
+                     "outline contains @QB_NAME hints",
+                     list_length(query_blocks));
+            }
+        }
+    }
+
+    return true;
+}
+
+/*
  * MatchOutlineForQuery - Main outline matching function
  *
  * Implements the matching strategy from OceanBase:
@@ -107,6 +136,9 @@ ValidateOutlineMatch(OutlineInfo *outline, Query *parse)
  * 2. Try normal outline with sql_id
  * 3. Try format outline with signature
  * 4. Try format outline with sql_id
+ *
+ * Enhanced with multi-query block support - generates complex signature
+ * for queries with multiple query blocks.
  */
 OutlineMatchResult *
 MatchOutlineForQuery(const char *query_string, Query *parse)
@@ -116,17 +148,38 @@ MatchOutlineForQuery(const char *query_string, Query *parse)
     char               *signature = NULL;
     char               *sql_id = NULL;
     OutlineInfo        *outline = NULL;
+    List               *query_blocks = NIL;
+    bool                is_complex_query = false;
 
     /* Allocate result structure */
     result = (OutlineMatchResult *) palloc0(sizeof(OutlineMatchResult));
     result->matched = false;
     result->outline = NULL;
     result->strategy = MATCH_BY_SIGNATURE;
+    result->query_blocks = NIL;
 
     /* Check if outline feature is enabled */
     if (!pg_outline_enabled)
     {
         return result;
+    }
+
+    /* Identify query blocks if we have parsed query */
+    if (parse)
+    {
+        query_blocks = IdentifyQueryBlocks(parse);
+        result->query_blocks = query_blocks;
+
+        if (query_blocks != NIL && list_length(query_blocks) > 1)
+        {
+            is_complex_query = true;
+
+            if (pg_outline_debug_log)
+            {
+                elog(DEBUG1, "pg_outline: Complex query detected with %d blocks",
+                     list_length(query_blocks));
+            }
+        }
     }
 
     /* Normalize the query */
@@ -144,8 +197,23 @@ MatchOutlineForQuery(const char *query_string, Query *parse)
         return result;
     }
 
-    /* Generate signature */
-    signature = GenerateSignature(normalized_sql);
+    /* Generate signature based on query complexity */
+    if (is_complex_query)
+    {
+        /* Generate complex signature with query block structure */
+        signature = GenerateComplexSignature(query_string, query_blocks);
+
+        if (pg_outline_debug_log)
+        {
+            elog(DEBUG2, "pg_outline: Complex signature: %s", signature);
+        }
+    }
+    else
+    {
+        /* Generate simple signature */
+        signature = GenerateSignature(normalized_sql);
+    }
+
     if (signature == NULL)
     {
         pfree(normalized_sql);
@@ -164,6 +232,7 @@ MatchOutlineForQuery(const char *query_string, Query *parse)
     /* Store in result for potential use */
     result->normalized_sql = pstrdup(normalized_sql);
     result->sql_id = pstrdup(sql_id);
+    result->signature = pstrdup(signature);
 
     /*
      * Strategy 1: Try normal outline with signature
@@ -171,7 +240,24 @@ MatchOutlineForQuery(const char *query_string, Query *parse)
     outline = MatchBySignature(signature, false);
     if (outline && CheckOutlineEnabled(outline))
     {
-        if (ValidateOutlineMatch(outline, parse))
+        if (is_complex_query)
+        {
+            if (ValidateComplexOutlineMatch(outline, parse, query_blocks))
+            {
+                result->outline = outline;
+                result->strategy = MATCH_BY_SIGNATURE;
+                result->matched = true;
+
+                if (pg_outline_debug_log)
+                {
+                    elog(LOG, "pg_outline: Matched complex query by signature (normal): %s",
+                         outline->outline_name);
+                }
+
+                goto cleanup;
+            }
+        }
+        else if (ValidateOutlineMatch(outline, parse))
         {
             result->outline = outline;
             result->strategy = MATCH_BY_SIGNATURE;
@@ -193,7 +279,24 @@ MatchOutlineForQuery(const char *query_string, Query *parse)
     outline = MatchBySqlId(sql_id, false);
     if (outline && CheckOutlineEnabled(outline))
     {
-        if (ValidateOutlineMatch(outline, parse))
+        if (is_complex_query)
+        {
+            if (ValidateComplexOutlineMatch(outline, parse, query_blocks))
+            {
+                result->outline = outline;
+                result->strategy = MATCH_BY_SQL_ID;
+                result->matched = true;
+
+                if (pg_outline_debug_log)
+                {
+                    elog(LOG, "pg_outline: Matched complex query by sql_id (normal): %s",
+                         outline->outline_name);
+                }
+
+                goto cleanup;
+            }
+        }
+        else if (ValidateOutlineMatch(outline, parse))
         {
             result->outline = outline;
             result->strategy = MATCH_BY_SQL_ID;
@@ -215,7 +318,24 @@ MatchOutlineForQuery(const char *query_string, Query *parse)
     outline = MatchBySignature(signature, true);
     if (outline && CheckOutlineEnabled(outline))
     {
-        if (ValidateOutlineMatch(outline, parse))
+        if (is_complex_query)
+        {
+            if (ValidateComplexOutlineMatch(outline, parse, query_blocks))
+            {
+                result->outline = outline;
+                result->strategy = MATCH_BY_FORMAT_SIGNATURE;
+                result->matched = true;
+
+                if (pg_outline_debug_log)
+                {
+                    elog(LOG, "pg_outline: Matched complex query by signature (format): %s",
+                         outline->outline_name);
+                }
+
+                goto cleanup;
+            }
+        }
+        else if (ValidateOutlineMatch(outline, parse))
         {
             result->outline = outline;
             result->strategy = MATCH_BY_FORMAT_SIGNATURE;
@@ -237,7 +357,24 @@ MatchOutlineForQuery(const char *query_string, Query *parse)
     outline = MatchBySqlId(sql_id, true);
     if (outline && CheckOutlineEnabled(outline))
     {
-        if (ValidateOutlineMatch(outline, parse))
+        if (is_complex_query)
+        {
+            if (ValidateComplexOutlineMatch(outline, parse, query_blocks))
+            {
+                result->outline = outline;
+                result->strategy = MATCH_BY_FORMAT_SQL_ID;
+                result->matched = true;
+
+                if (pg_outline_debug_log)
+                {
+                    elog(LOG, "pg_outline: Matched complex query by sql_id (format): %s",
+                         outline->outline_name);
+                }
+
+                goto cleanup;
+            }
+        }
+        else if (ValidateOutlineMatch(outline, parse))
         {
             result->outline = outline;
             result->strategy = MATCH_BY_FORMAT_SQL_ID;
@@ -282,6 +419,11 @@ FreeMatchResult(OutlineMatchResult *result)
 
     if (result->sql_id)
         pfree(result->sql_id);
+
+    if (result->signature)
+        pfree(result->signature);
+
+    /* Note: query_blocks are managed in their own memory context */
 
     pfree(result);
 }

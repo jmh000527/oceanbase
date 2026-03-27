@@ -9,6 +9,8 @@ The PostgreSQL Outline Plugin (`pg_outline`) provides SQL execution plan stabili
 - **Plan Stabilization**: Fix execution plans for specific SQL patterns
 - **SQL Normalization**: Automatic parameter extraction for matching queries with different constants
 - **Multi-Strategy Matching**: Match outlines by signature or SQL ID
+- **Multi-Query Block Support**: Target hints to specific query blocks using @QB_NAME syntax
+- **Complex Query Support**: Handle subqueries, CTEs, UNION, and nested queries
 - **Efficient Caching**: In-memory hash-based lookup for fast outline retrieval
 - **Usage Statistics**: Track outline usage and performance metrics
 - **Format Outlines**: Support for flexible outline matching patterns
@@ -63,16 +65,73 @@ SELECT pg_reload_conf();
 
 ## Usage
 
-### Creating an Outline
+### Basic Outline Creation
 
 ```sql
--- Create an outline to force a sequential scan
+-- Create a simple outline to force a sequential scan
 SELECT pg_outline_create(
     'outline_test1',                           -- outline name
     'SELECT * FROM users WHERE id = 100',      -- target SQL
-    '/*+ SeqScan(users) */'                    -- hints to apply
+    '/*+ SeqScan(users) */',                   -- hints to apply
+    'Force seqscan on users table',            -- description (optional)
+    true                                        -- enabled (default: true)
 );
 ```
+
+### Multi-Query Block Outlines
+
+For complex queries with subqueries, use @QB_NAME syntax to target specific query blocks:
+
+```sql
+-- Create outline for query with subquery
+SELECT pg_outline_create(
+    'outline_complex',
+    $$SELECT * FROM users
+      WHERE id IN (SELECT user_id FROM orders WHERE amount > 100)$$,
+    $$/*+ INDEX(@SEL$ABCD1234_1 users idx_users_id)
+         INDEX(@SEL$EFGH5678_2 orders idx_orders_user_amount) */$$,
+    'Outline with multi-block hints'
+);
+```
+
+**Understanding Query Blocks:**
+
+Each query block in a SQL statement gets a unique QB_NAME:
+- Main query: `SEL$xxxxx_0` (SELECT), `INS$xxxxx_0` (INSERT), etc.
+- Subqueries: `SEL$xxxxx_1`, `SEL$xxxxx_2`, etc.
+- CTEs: Numbered sequentially
+- Set operations: `SET$xxxxx_1`, `SET$xxxxx_2`
+
+**Common Scenarios:**
+
+```sql
+-- Subquery in WHERE clause
+/*+ INDEX(@SEL$MAIN_1 users pk)
+    INDEX(@SEL$SUB_2 orders idx_user) */
+
+-- Subquery in FROM (derived table)
+/*+ HASHJOIN(@SEL$MAIN_1 u o)
+    SEQSCAN(@SEL$DERIVED_2 orders) */
+
+-- Multiple subqueries in SELECT list
+/*+ INDEX(@SEL$MAIN_1 users pk)
+    INDEX(@SEL$SUB1_2 orders idx1)
+    INDEX(@SEL$SUB2_3 orders idx2) */
+
+-- CTE (WITH clause)
+/*+ INDEX(@SEL$CTE_2 orders idx_created)
+    HASHJOIN(@SEL$MAIN_1 u ro) */
+
+-- Nested subqueries (3 levels)
+/*+ INDEX(@SEL$L1_1 users pk)
+    INDEX(@SEL$L2_2 orders idx_user)
+    INDEX(@SEL$L3_3 products idx_cat) */
+
+-- Global hints (apply to all blocks)
+/*+ LEADING(u o) HASHJOIN(u o) */
+```
+
+For detailed examples, see [Multi-Block Examples](doc/MULTI_BLOCK_EXAMPLES.sql)
 
 ### Listing Outlines
 

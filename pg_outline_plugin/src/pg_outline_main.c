@@ -13,6 +13,7 @@
 #include "pg_outline.h"
 #include "outline_matcher.h"
 #include "outline_hints.h"
+#include "outline_query_block.h"
 
 #include "commands/explain.h"
 #include "optimizer/planner.h"
@@ -130,7 +131,8 @@ _PG_fini(void)
  * pg_outline_planner_hook - Planner hook for outline application
  *
  * This hook is called during query planning. It matches the query against
- * outlines and applies hints if a match is found.
+ * outlines and applies hints if a match is found. Supports multi-query
+ * block hints with @QB_NAME targeting.
  */
 static PlannedStmt *
 pg_outline_planner_hook(Query *parse,
@@ -141,10 +143,22 @@ pg_outline_planner_hook(Query *parse,
     OutlineMatchResult *match_result = NULL;
     PlannedStmt        *result = NULL;
     bool                outline_applied = false;
+    List               *query_blocks = NIL;
+    List               *parsed_hints = NIL;
 
     /* Try to match an outline if feature is enabled */
     if (pg_outline_enabled && parse && query_string)
     {
+        /* Identify all query blocks in the query tree */
+        query_blocks = IdentifyQueryBlocks(parse);
+
+        if (pg_outline_debug_log && query_blocks != NIL)
+        {
+            elog(LOG, "pg_outline: Identified %d query blocks",
+                 list_length(query_blocks));
+            PrintQueryBlocks(query_blocks);
+        }
+
         /* Match outline for this query */
         match_result = MatchOutlineForQuery(query_string, parse);
 
@@ -158,15 +172,25 @@ pg_outline_planner_hook(Query *parse,
             /* Apply outline hints */
             if (outline->outline_content && *outline->outline_content)
             {
-                /* Set hints for pg_hint_plan or our hint system */
-                SetHintForQuery(outline->outline_content);
-                outline_applied = true;
+                /* Parse multi-block hints */
+                parsed_hints = ParseMultiBlockHints(outline->outline_content);
 
-                if (pg_outline_debug_log)
+                if (parsed_hints != NIL)
                 {
-                    elog(LOG, "pg_outline: Applied hints: %s",
-                         outline->outline_content);
+                    /* Apply hints to respective query blocks */
+                    ApplyQueryBlockHints(parse, query_blocks, parsed_hints);
+                    outline_applied = true;
+
+                    if (pg_outline_debug_log)
+                    {
+                        elog(LOG, "pg_outline: Applied %d hints across %d query blocks",
+                             list_length(parsed_hints),
+                             list_length(query_blocks));
+                    }
                 }
+
+                /* Set global hints for pg_hint_plan or our hint system */
+                SetHintForQuery(outline->outline_content);
             }
 
             /* Record usage statistics */
@@ -196,7 +220,7 @@ pg_outline_planner_hook(Query *parse,
         /* Could add custom fields to track outline usage */
         if (pg_outline_debug_log)
         {
-            elog(DEBUG1, "pg_outline: Plan generated with outline hints");
+            elog(DEBUG1, "pg_outline: Plan generated with multi-block outline hints");
         }
     }
 

@@ -29,6 +29,8 @@ typedef struct OutlineMatchResult
     OutlineMatchStrategy strategy;
     char                *normalized_sql;
     char                *sql_id;
+    char                *signature;
+    List                *query_blocks;  /* List of QueryBlockInfo */
     bool                matched;
 } OutlineMatchResult;
 
@@ -44,6 +46,8 @@ extern OutlineInfo *MatchBySqlId(const char *sql_id, bool format_outline);
 
 /* Match validation */
 extern bool ValidateOutlineMatch(OutlineInfo *outline, Query *parse);
+extern bool ValidateComplexOutlineMatch(OutlineInfo *outline, Query *parse,
+                                       List *query_blocks);
 extern bool CheckOutlineEnabled(OutlineInfo *outline);
 
 /* Cleanup */
