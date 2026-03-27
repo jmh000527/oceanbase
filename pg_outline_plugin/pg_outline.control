@@ -1,0 +1,6 @@
+-- Extension control file
+comment = 'PostgreSQL Outline - Execution plan stabilization based on OceanBase outline feature'
+default_version = '1.0'
+module_pathname = '$libdir/pg_outline'
+relocatable = true
+requires = ''
