@@ -39,7 +39,7 @@ static void pg_outline_post_parse_hook(ParseState *pstate,
                                       Query *query,
                                       JumbleState *jstate);
 
-/*
+/*-*-
  * _PG_init - Extension initialization
  *
  * Called when the extension is loaded. Sets up hooks and configuration.
@@ -106,7 +106,7 @@ _PG_init(void)
     elog(LOG, "pg_outline: Extension initialization complete");
 }
 
-/*
+/*-*-
  * _PG_fini - Extension cleanup
  *
  * Called when the extension is unloaded. Restores hooks and cleans up.
@@ -126,7 +126,7 @@ _PG_fini(void)
     elog(LOG, "pg_outline: Extension shutdown complete");
 }
 
-/*
+/*-*-
  * pg_outline_planner_hook - Planner hook for outline application
  *
  * This hook is called during query planning. It matches the query against
@@ -203,7 +203,7 @@ pg_outline_planner_hook(Query *parse,
     return result;
 }
 
-/*
+/*-*-
  * pg_outline_post_parse_hook - Post-parse analysis hook
  *
  * This hook is called after query parsing. Can be used for additional
@@ -224,7 +224,7 @@ pg_outline_post_parse_hook(ParseState *pstate,
     /* For example: early outline matching, query validation, etc. */
 }
 
-/*
+/*-*-
  * MatchOutline - High-level API for outline matching
  *
  * This function provides a simple interface for matching outlines
