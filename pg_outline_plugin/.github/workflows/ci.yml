@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  test:
+    name: PostgreSQL ${{ matrix.pg }} on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-20.04, ubuntu-22.04]
+        pg: [12, 13, 14, 15, 16]
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Install PostgreSQL
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y postgresql-${{ matrix.pg }} postgresql-server-dev-${{ matrix.pg }}
+
+    - name: Build extension
+      run: |
+        export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+        make PG_CONFIG=$PG_CONFIG
+
+    - name: Run validation tests
+      run: |
+        bash validate.sh
+
+    - name: Install extension
+      run: |
+        export PG_CONFIG=/usr/lib/postgresql/${{ matrix.pg }}/bin/pg_config
+        sudo make install PG_CONFIG=$PG_CONFIG
+
+    - name: Start PostgreSQL
+      run: |
+        sudo systemctl start postgresql@${{ matrix.pg }}-main
+        sudo -u postgres psql -c "CREATE DATABASE test_db;"
+
+    - name: Create extension
+      run: |
+        sudo -u postgres psql test_db -c "CREATE EXTENSION pg_outline;"
+        sudo -u postgres psql test_db -c "SELECT * FROM pg_outline_info;"
+
+    - name: Run functional tests
+      run: |
+        sudo -u postgres psql test_db -f test/test_outline.sql
+        sudo -u postgres psql test_db -f test/test_multi_block.sql
+        sudo -u postgres psql test_db -f test/test_query_block_identification.sql
+        sudo -u postgres psql test_db -f test/test_hint_parser.sql
+
+  lint:
+    name: Code Quality
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Check code formatting
+      run: |
+        # Check for trailing whitespace
+        ! git grep -I --line-number --perl-regexp '\s+$' -- '*.c' '*.h'
+
+    - name: Validate documentation
+      run: |
+        # Check that README exists and has content
+        test -s README.md
+        test -s doc/INSTALL.md
+
+  build-docker:
+    name: Docker Build Test
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v3
+
+    - name: Build Docker image
+      run: |
+        docker build -t pg_outline_test -f Dockerfile .
+      if: always()
+
+    - name: Test in Docker
+      run: |
+        docker run --rm pg_outline_test psql -U postgres -c "CREATE EXTENSION pg_outline; SELECT * FROM pg_outline_info;"
+      if: always()
